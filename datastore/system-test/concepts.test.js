@@ -47,8 +47,8 @@ describe('datastore:concepts', function () {
 
   // Transactions
 
-  it('performs a transactional update', function (done) {
-    transaction.testTransactionalUpdate(done);
+  it(`performs a transactional update`, () => {
+    return transaction.testTransactionalUpdate();
   });
 
   it('performs retries if necessary', function (done) {

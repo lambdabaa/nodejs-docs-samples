@@ -13,6 +13,7 @@
 
 'use strict';
 
+const assert = require('power-assert');
 var asyncUtil = require('async');
 // By default, the client will authenticate using the service account file
 // specified by the GOOGLE_APPLICATION_CREDENTIALS environment variable and use
@@ -29,7 +30,7 @@ module.exports = {
 };
 
 // This mock is used in the documentation snippets.
-var datastore = {
+let datastore = {
   delete: function () {},
   get: function () {},
   insert: function () {},
@@ -1032,44 +1033,37 @@ Query.prototype.testCursorPaging = function (callback) {
 
 Query.prototype.testEventualConsistentQuery = function () {
   // [START eventual_consistent_query]
-  // Read consistency cannot be specified in gcloud-node.
+  // Read consistency cannot be specified in google-cloud-node.
   // [END eventual_consistent_query]
 };
 
 // [START transactional_update]
-function transferFunds (fromKey, toKey, amount, callback) {
-  var transaction = datastore.transaction();
+function transferFunds (fromKey, toKey, amount) {
+  const transaction = datastore.transaction();
 
-  transaction.run(function (err) {
-    if (err) {
-      return callback(err);
-    }
+  return transaction.run()
+    .then(() => Promise.all([transaction.get(fromKey), transaction.get(toKey)]))
+    .then((results) => {
+      const accounts = results
+        .map((result) => result[0]);
 
-    transaction.get([
-      fromKey,
-      toKey
-    ], function (err, accounts) {
-      if (err) {
-        return transaction.rollback(function (_err) {
-          return callback(_err || err);
-        });
-      }
+      accounts[0].balance -= amount;
+      accounts[1].balance += amount;
 
-      accounts[0].data.balance -= amount;
-      accounts[1].data.balance += amount;
-
-      transaction.save(accounts);
-
-      transaction.commit(function (err) {
-        if (err) {
-          return callback(err);
+      transaction.save([
+        {
+          key: fromKey,
+          data: accounts[0]
+        },
+        {
+          key: toKey,
+          data: accounts[1]
         }
+      ]);
 
-        // The transaction completed successfully.
-        callback();
-      });
-    });
-  });
+      return transaction.commit();
+    })
+    .catch(() => transaction.rollback());
 }
 // [END transactional_update]
 
@@ -1087,8 +1081,8 @@ function Transaction (projectId) {
   this.amountToTransfer = 10;
 }
 
-Transaction.prototype.restoreBankAccountBalances = function (config, callback) {
-  var saveArray = config.keys.map(function (key) {
+Transaction.prototype.restoreBankAccountBalances = function (config) {
+  const entities = config.keys.map((key) => {
     return {
       key: key,
       data: {
@@ -1097,60 +1091,39 @@ Transaction.prototype.restoreBankAccountBalances = function (config, callback) {
     };
   });
 
-  this.datastore.save(saveArray, callback);
+  console.log(entities);
+
+  return this.datastore.save(entities);
 };
 
-Transaction.prototype.testTransactionalUpdate = function (callback) {
-  var self = this;
+Transaction.prototype.testTransactionalUpdate = function () {
+  const fromKey = this.fromKey;
+  const toKey = this.toKey;
+  const originalBalance = this.originalBalance;
+  const amountToTransfer = this.amountToTransfer;
+  const datastoreMock = datastore;
 
-  var fromKey = this.fromKey;
-  var toKey = this.toKey;
-  var originalBalance = this.originalBalance;
-  var amountToTransfer = this.amountToTransfer;
+  // Overwrite so the real Datastore instance is used in `transferFunds`.
+  datastore = this.datastore;
 
-  this.restoreBankAccountBalances({
+  return this.restoreBankAccountBalances({
     keys: [fromKey, toKey],
     balance: originalBalance
-  }, function (err) {
-    if (err) {
-      callback(err);
-      return;
-    }
-
-    // Overwrite so the real Datastore instance is used in `transferFunds`.
-    var datastoreMock = datastore;
-    datastore = self.datastore;
-
-    transferFunds(fromKey, toKey, amountToTransfer, function (err) {
+  })
+    .then(() => transferFunds(fromKey, toKey, amountToTransfer))
+    .then(() => Promise.all([this.datastore.get(fromKey), this.datastore.get(toKey)]))
+    .then((results) => {
+      const accounts = results.map((result) => result[0]);
       // Restore `datastore` to the mock API.
       datastore = datastoreMock;
-
-      if (err) {
-        callback(err);
-        return;
-      }
-
-      self.datastore.get([
-        fromKey,
-        toKey
-      ], function (err, accounts) {
-        if (err) {
-          callback(err);
-          return;
-        }
-
-        var transactionWasSuccessful =
-          accounts[0].data.balance === originalBalance - amountToTransfer &&
-          accounts[1].data.balance === originalBalance + amountToTransfer;
-
-        if (!transactionWasSuccessful) {
-          callback(new Error('Accounts were not updated successfully.'));
-        } else {
-          callback();
-        }
-      });
+      assert.equal(accounts[0].balance, originalBalance - amountToTransfer);
+      assert.equal(accounts[1].balance, originalBalance + amountToTransfer);
+    })
+    .catch((err) => {
+      // Restore `datastore` to the mock API.
+      datastore = datastoreMock;
+      return Promise.reject(err);
     });
-  });
 };
 
 Transaction.prototype.testTransactionalRetry = function (callback) {
